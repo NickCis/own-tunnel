@@ -83,6 +83,7 @@ See [config.example.yaml](config.example.yaml).
 
 - Users: `password_hash` (bcrypt) and/or `authorized_keys`
 - Plaintext passwords are rejected at config load
+- Auth throttling (`auth.*`): per-IP lockout after repeated failures (defaults: 5 in 15m → 15m ban)
 - Host keys are auto-generated under `host_keys_dir` (default `./host_keys`)
 
 ## Logs

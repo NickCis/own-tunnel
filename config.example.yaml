@@ -1,0 +1,41 @@
+# Copy to config.yaml and adjust.
+# Generate a password hash with:
+#   go run ./scripts/hashpassword.go 'your-password'
+
+domain: tunnel.example.com
+
+listen:
+  ssh: ":2222"    # use ":22" in production (needs privilege)
+  http: ":8080"   # use ":80" in production
+  https: ":8443"  # use ":443" in production
+
+host_keys_dir: ./host_keys
+
+# Optional. Omit the whole tls: block (or leave cert/key empty) to disable HTTPS.
+# tls:
+#   cert: ./certs/fullchain.pem
+#   key: ./certs/privkey.pem
+#   domains:
+#     api.tunnel.example.com:
+#       cert: ./certs/api.pem
+#       key: ./certs/api-key.pem
+
+log:
+  level: info   # debug|info|warn|error
+  format: json  # json|text
+
+# SSH auth throttling (per source IP). Defaults shown.
+auth:
+  max_failures: 5       # failures within failure_window → lockout
+  failure_window: 15m
+  lockout: 15m
+  max_auth_tries: 3     # per SSH connection (x/crypto/ssh MaxAuthTries)
+
+users:
+  - name: alice
+    # bcrypt for "password" — replace with: go run ./scripts/hashpassword.go 'secret'
+    password_hash: "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+    # Optional. Must be a real public key line (e.g. from ~/.ssh/id_ed25519.pub).
+    # Fake/placeholder keys cause startup to fail.
+    # authorized_keys:
+    #   - "ssh-ed25519 AAAA... alice@laptop"

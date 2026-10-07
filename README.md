@@ -75,7 +75,7 @@ ssh -L 5432:myapp:5432 bob@tunnel.example.com
 ssh alice@tunnel.example.com
 ```
 
-Commands: `help`, `list` (all users' tunnels, sorted by name then port), `quit`. Useful to validate auth and inspect active forwards.
+Commands: `help`, `list` (all tunnels), `blocked` (rate-limited IPs), `quit`. Useful to validate auth and inspect active forwards.
 
 ## Config
 

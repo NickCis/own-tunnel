@@ -39,3 +39,18 @@ func TestLimiterWindowExpiry(t *testing.T) {
 		t.Fatal("should not lock out when failures fall outside window")
 	}
 }
+
+func TestLimiterBlocked(t *testing.T) {
+	l := NewLimiter(1, time.Minute, time.Minute)
+	if len(l.Blocked()) != 0 {
+		t.Fatal("expected empty")
+	}
+	l.Fail("198.51.100.7:22")
+	blocked := l.Blocked()
+	if len(blocked) != 1 || blocked[0].IP != "198.51.100.7" {
+		t.Fatalf("blocked=%+v", blocked)
+	}
+	if blocked[0].Remaining <= 0 {
+		t.Fatalf("remaining=%s", blocked[0].Remaining)
+	}
+}

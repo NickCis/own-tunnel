@@ -551,9 +551,10 @@ func (s *Server) runMenu(st *sessionState, ch ssh.Channel) {
 
 func (s *Server) printHelp(ch ssh.Channel) {
 	writePty(ch, `Commands:
-  help     Show this help
-  list     List all active tunnels
-  quit     Disconnect
+  help      Show this help
+  list      List all active tunnels
+  blocked   List IPs currently locked out by auth throttling
+  quit      Disconnect
 
 Create HTTP tunnel:
   ssh -R <name>:80:localhost:<localport> <user>@<server>
@@ -584,6 +585,20 @@ func (s *Server) handleMenuCommand(st *sessionState, ch ssh.Channel, cmd string)
 			} else {
 				writePty(ch, fmt.Sprintf("  [tcp]  %s:%d  owner %s\n", t.Name, t.Port, t.User))
 			}
+		}
+		return true
+	case "blocked", "blocklist", "bans", "ban":
+		blocked := s.Authenticator.BlockedIPs()
+		if len(blocked) == 0 {
+			writePty(ch, "(no blocked IPs)\n")
+			return true
+		}
+		for _, b := range blocked {
+			writePty(ch, fmt.Sprintf("  %s  until %s  (%s left)\n",
+				b.IP,
+				b.LockedUntil.Format(time.RFC3339),
+				b.Remaining,
+			))
 		}
 		return true
 	case "quit", "exit", "q":

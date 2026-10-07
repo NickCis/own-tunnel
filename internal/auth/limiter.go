@@ -2,6 +2,7 @@ package auth
 
 import (
 	"net"
+	"sort"
 	"sync"
 	"time"
 )
@@ -97,6 +98,45 @@ func (l *Limiter) Success(peerAddr string) {
 	l.mu.Lock()
 	delete(l.byIP, ip)
 	l.mu.Unlock()
+}
+
+// BlockedIP is a currently locked-out source address.
+type BlockedIP struct {
+	IP          string
+	LockedUntil time.Time
+	Remaining   time.Duration
+}
+
+// Blocked returns IPs that are currently locked out, sorted by IP.
+// Expired entries are pruned as a side effect.
+func (l *Limiter) Blocked() []BlockedIP {
+	if l == nil {
+		return nil
+	}
+	now := time.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	out := make([]BlockedIP, 0)
+	for ip, st := range l.byIP {
+		if now.Before(st.lockedUntil) {
+			out = append(out, BlockedIP{
+				IP:          ip,
+				LockedUntil: st.lockedUntil,
+				Remaining:   st.lockedUntil.Sub(now).Round(time.Second),
+			})
+			continue
+		}
+		// Expired lockout — prune if nothing else to keep.
+		st.failures = pruneFailures(st.failures, now.Add(-l.Window))
+		if len(st.failures) == 0 {
+			delete(l.byIP, ip)
+		} else {
+			st.lockedUntil = time.Time{}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].IP < out[j].IP })
+	return out
 }
 
 func pruneFailures(in []time.Time, cutoff time.Time) []time.Time {

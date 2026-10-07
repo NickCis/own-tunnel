@@ -133,3 +133,11 @@ func (a *Authenticator) HasUser(name string) bool {
 	_, ok := a.users[name]
 	return ok
 }
+
+// BlockedIPs returns currently rate-limited source addresses.
+func (a *Authenticator) BlockedIPs() []BlockedIP {
+	if a == nil || a.limiter == nil {
+		return nil
+	}
+	return a.limiter.Blocked()
+}

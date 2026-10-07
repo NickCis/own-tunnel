@@ -1,0 +1,28 @@
+# Binaries
+/own-tunnel
+/bin/
+*.exe
+*.test
+*.out
+
+# Go
+vendor/
+
+# Runtime / local config (keep examples tracked)
+/config.yaml
+/host_keys/
+/certs/
+*.pem
+*.key
+!*.example.yaml
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# Logs / temp
+*.log
+/tmp/

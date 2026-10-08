@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nickcis/own-tunnel/internal/perms"
 	"gopkg.in/yaml.v3"
 )
 
@@ -53,6 +54,9 @@ type UserConfig struct {
 	Name           string   `yaml:"name"`
 	PasswordHash   string   `yaml:"password_hash"`
 	AuthorizedKeys []string `yaml:"authorized_keys"`
+	// Permissions: admin | publish | dial | peers | blocks (and aliases).
+	// Empty/omitted → publish + dial (own tunnels only).
+	Permissions []string `yaml:"permissions"`
 }
 
 func Load(path string) (*Config, error) {
@@ -142,6 +146,12 @@ func (c *Config) Validate() error {
 		if u.PasswordHash == "" && len(u.AuthorizedKeys) == 0 {
 			return fmt.Errorf("user %q: need password_hash and/or authorized_keys", u.Name)
 		}
+		parsed, err := perms.Parse(u.Permissions)
+		if err != nil {
+			return fmt.Errorf("user %q: %w", u.Name, err)
+		}
+		// Normalize to canonical names (and apply defaults when empty).
+		u.Permissions = parsed.List()
 	}
 
 	if c.Auth.MaxFailures < 1 {

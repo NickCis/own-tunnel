@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/nickcis/own-tunnel/internal/config"
+	"github.com/nickcis/own-tunnel/internal/perms"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/crypto/ssh"
 )
@@ -21,6 +22,7 @@ type userAuth struct {
 	name           string
 	passwordHash   string
 	authorizedKeys map[string]ssh.PublicKey // fingerprint -> key
+	perms          perms.Set
 }
 
 func New(users []config.UserConfig, logger *slog.Logger, limiter *Limiter) (*Authenticator, error) {
@@ -38,10 +40,15 @@ func New(users []config.UserConfig, logger *slog.Logger, limiter *Limiter) (*Aut
 
 	for _, u := range users {
 		name := strings.TrimSpace(u.Name)
+		pset, err := perms.Parse(u.Permissions)
+		if err != nil {
+			return nil, fmt.Errorf("user %q: %w", name, err)
+		}
 		ua := &userAuth{
 			name:           name,
 			passwordHash:   u.PasswordHash,
 			authorizedKeys: make(map[string]ssh.PublicKey),
+			perms:          pset,
 		}
 		for i, line := range u.AuthorizedKeys {
 			line = strings.TrimSpace(line)
@@ -132,6 +139,30 @@ func (a *Authenticator) PublicKey(conn ssh.ConnMetadata, key ssh.PublicKey) (*ss
 func (a *Authenticator) HasUser(name string) bool {
 	_, ok := a.users[name]
 	return ok
+}
+
+// Can reports whether user has permission p (admin implies all).
+func (a *Authenticator) Can(user string, p perms.Permission) bool {
+	if a == nil {
+		return false
+	}
+	u, ok := a.users[user]
+	if !ok || u.perms == nil {
+		return false
+	}
+	return u.perms.Has(p)
+}
+
+// Perms returns a copy-like view of the user's permission set (may be nil).
+func (a *Authenticator) Perms(user string) perms.Set {
+	if a == nil {
+		return nil
+	}
+	u, ok := a.users[user]
+	if !ok {
+		return nil
+	}
+	return u.perms
 }
 
 // BlockedIPs returns currently rate-limited source addresses.

@@ -48,6 +48,31 @@ users:
 	if cfg.Auth.MaxFailures != 5 || cfg.Auth.Lockout != "15m" {
 		t.Fatalf("auth defaults: %+v", cfg.Auth)
 	}
+	if len(cfg.Users[0].Permissions) != 2 {
+		t.Fatalf("default perms=%v", cfg.Users[0].Permissions)
+	}
+}
+
+func TestLoadPermissionsAdmin(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	content := `
+domain: tunnel.example.com
+users:
+  - name: ops
+    password_hash: "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+    permissions: [admin]
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Users[0].Permissions) != 1 || cfg.Users[0].Permissions[0] != "admin" {
+		t.Fatalf("perms=%v", cfg.Users[0].Permissions)
+	}
 }
 
 func TestLoadTrimsDomainAndUser(t *testing.T) {

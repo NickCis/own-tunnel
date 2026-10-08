@@ -18,7 +18,8 @@ Single-process Go SSH tunnel server (ngrok-like) using stock OpenSSH clients:
 
 ```
 cmd/own-tunnel/          # main
-internal/auth/           # password (bcrypt) + authorized_keys + per-IP lockout
+internal/auth/           # password (bcrypt) + authorized_keys + per-IP lockout + perms lookup
+internal/perms/          # permission names / parsing
 internal/config/         # YAML load + validate
 internal/hostkeys/       # Ed25519 host key load/generate
 internal/httpproxy/      # HTTP/HTTPS reverse proxy (Host/SNI → tunnel)
@@ -41,6 +42,7 @@ config.example.yaml
 - `direct-tcpip` must **only** resolve registered tunnel names — never dial arbitrary hosts (no open relay).
 - Passwords in config are **bcrypt hashes only**; reject plaintext at load.
 - Auth: per-IP fail2ban-style lockout (defaults 5 failures / 15m → 15m ban); trim domain/usernames at load; dummy bcrypt for unknown users.
+- Permissions (`admin`|`publish`|`dial`|`peers`|`blocks`): default `publish`+`dial`; `peers` for cross-user list/`-L`; `blocks` for `blocked` command; `admin` implies all.
 - v1: single process, YAML users, in-memory registry. No ACME inside the process, no multi-node, no UDP, no custom domains beyond `{name}.{domain}`.
 
 ## Commands

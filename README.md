@@ -75,7 +75,7 @@ ssh -L 5432:myapp:5432 bob@tunnel.example.com
 ssh alice@tunnel.example.com
 ```
 
-Commands: `help`, `list` (all tunnels), `blocked` (rate-limited IPs), `quit`. Useful to validate auth and inspect active forwards.
+Commands: `help`, `list`, `blocked` (needs `blocks`), `whoami`, `quit`. `list` shows your tunnels, or everyone's with `peers`.
 
 ## Config
 
@@ -83,6 +83,7 @@ See [config.example.yaml](config.example.yaml).
 
 - Users: `password_hash` (bcrypt) and/or `authorized_keys`
 - Plaintext passwords are rejected at config load
+- Permissions per user (`permissions`): `admin`, `publish` (`-R`), `dial` (`-L`), `peers` (other users' tunnels), `blocks` (view lockouts). Default if omitted: `publish` + `dial` (own tunnels only)
 - Auth throttling (`auth.*`): per-IP lockout after repeated failures (defaults: 5 in 15m → 15m ban)
 - Host keys are auto-generated under `host_keys_dir` (default `./host_keys`)
 

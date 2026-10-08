@@ -35,7 +35,16 @@ users:
   - name: alice
     # bcrypt for "password" — replace with: go run ./scripts/hashpassword.go 'secret'
     password_hash: "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+    # Permissions (omit for default: publish + dial, own tunnels only):
+    #   admin    — everything
+    #   publish  — create tunnels (-R)
+    #   dial     — consume TCP tunnels (-L)
+    #   peers    — list/dial other users' tunnels
+    #   blocks   — view auth block list (`blocked` command)
+    # permissions: [publish, dial]
     # Optional. Must be a real public key line (e.g. from ~/.ssh/id_ed25519.pub).
-    # Fake/placeholder keys cause startup to fail.
     # authorized_keys:
     #   - "ssh-ed25519 AAAA... alice@laptop"
+  # - name: ops
+  #   password_hash: "..."
+  #   permissions: [admin]

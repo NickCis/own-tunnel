@@ -12,6 +12,7 @@ import (
 
 	"github.com/nickcis/own-tunnel/internal/auth"
 	"github.com/nickcis/own-tunnel/internal/namegen"
+	"github.com/nickcis/own-tunnel/internal/perms"
 	"github.com/nickcis/own-tunnel/internal/registry"
 	"golang.org/x/crypto/ssh"
 )
@@ -217,6 +218,15 @@ func (s *Server) handleTCPIPForward(st *sessionState, req *ssh.Request) {
 		return
 	}
 
+	if !s.Authenticator.Can(st.user, perms.Publish) {
+		s.Logger.Warn("tunnel reject", "user", st.user, "port", rf.Port, "reason", "permission_denied", "need", "publish")
+		if req.WantReply {
+			_ = req.Reply(false, nil)
+		}
+		st.failAndExit("error: permission denied: publish required for remote forwards (-R)\n")
+		return
+	}
+
 	autoNamed := namegen.IsEphemeralBind(rf.Addr)
 	opts := registry.RegisterOpts{
 		Port:       rf.Port,
@@ -323,6 +333,13 @@ func (s *Server) handleDirectTCPIP(st *sessionState, newChannel ssh.NewChannel) 
 		return
 	}
 
+	if !s.Authenticator.Can(st.user, perms.Dial) {
+		s.Logger.Warn("tcp consume rejected", "user", st.user, "dest", payload.DestAddr, "port", payload.DestPort, "reason", "permission_denied", "need", "dial")
+		_ = newChannel.Reject(ssh.Prohibited, "permission denied")
+		st.failAndExit("error: permission denied: dial required for local forwards (-L)\n")
+		return
+	}
+
 	dest := strings.ToLower(strings.TrimSpace(payload.DestAddr))
 	if namegen.IsEphemeralBind(dest) || net.ParseIP(dest) != nil || strings.Contains(dest, ".") {
 		s.Logger.Warn("tcp consume rejected", "user", st.user, "dest", payload.DestAddr, "port", payload.DestPort, "reason", "not_a_tunnel_name")
@@ -342,6 +359,13 @@ func (s *Server) handleDirectTCPIP(st *sessionState, newChannel ssh.NewChannel) 
 		s.Logger.Warn("tcp consume rejected", "user", st.user, "name", name, "port", payload.DestPort, "reason", "not_found")
 		_ = newChannel.Reject(ssh.ConnectionFailed, "tunnel not found")
 		st.failAndExit(fmt.Sprintf("error: tunnel %s:%d not found\n", name, payload.DestPort))
+		return
+	}
+
+	if t.User != st.user && !s.Authenticator.Can(st.user, perms.Peers) {
+		s.Logger.Warn("tcp consume rejected", "user", st.user, "name", name, "port", payload.DestPort, "owner", t.User, "reason", "permission_denied", "need", "peers")
+		_ = newChannel.Reject(ssh.Prohibited, "permission denied")
+		st.failAndExit(fmt.Sprintf("error: permission denied: peers required to dial %s:%d (owner %s)\n", name, payload.DestPort, t.User))
 		return
 	}
 
@@ -488,7 +512,7 @@ func writePty(w io.Writer, s string) {
 
 func (s *Server) runMenu(st *sessionState, ch ssh.Channel) {
 	writePty(ch, "\n")
-	s.printHelp(ch)
+	s.printHelp(st, ch)
 	writePty(ch, "> ")
 
 	buf := make([]byte, 256)
@@ -549,45 +573,73 @@ func (s *Server) runMenu(st *sessionState, ch ssh.Channel) {
 	}
 }
 
-func (s *Server) printHelp(ch ssh.Channel) {
+func (s *Server) printHelp(st *sessionState, ch ssh.Channel) {
 	writePty(ch, `Commands:
   help      Show this help
-  list      List all active tunnels
-  blocked   List IPs currently locked out by auth throttling
+  list      List tunnels (yours; all users with peers)
+  blocked   List locked-out IPs (requires blocks)
+  whoami    Show your permissions
   quit      Disconnect
 
-Create HTTP tunnel:
+Create HTTP tunnel (requires publish):
   ssh -R <name>:80:localhost:<localport> <user>@<server>
 
-Create TCP tunnel:
+Create TCP tunnel (requires publish):
   ssh -R <name>:<port>:localhost:<localport> <user>@<server>
 
-Consume TCP tunnel:
+Consume TCP tunnel (requires dial; peers for others' tunnels):
   ssh -L <localport>:<name>:<port> <user>@<server>
 
 `)
+	if p := s.Authenticator.Perms(st.user); p != nil {
+		writePty(ch, fmt.Sprintf("Your permissions: %s\n\n", strings.Join(p.List(), ", ")))
+	}
 }
 
 func (s *Server) handleMenuCommand(st *sessionState, ch ssh.Channel, cmd string) bool {
 	switch strings.ToLower(strings.Fields(cmd)[0]) {
 	case "help", "h", "?":
-		s.printHelp(ch)
+		s.printHelp(st, ch)
+		return true
+	case "whoami", "perms", "permissions":
+		p := s.Authenticator.Perms(st.user)
+		if p == nil || len(p.List()) == 0 {
+			writePty(ch, "(no permissions)\n")
+			return true
+		}
+		writePty(ch, fmt.Sprintf("%s\n", strings.Join(p.List(), ", ")))
 		return true
 	case "list", "ls", "l":
-		tunnels := s.Registry.ListAll()
+		seePeers := s.Authenticator.Can(st.user, perms.Peers)
+		var tunnels []*registry.Tunnel
+		if seePeers {
+			tunnels = s.Registry.ListAll()
+		} else {
+			tunnels = s.Registry.ListByUser(st.user)
+		}
 		if len(tunnels) == 0 {
 			writePty(ch, "(no active tunnels)\n")
 			return true
 		}
 		for _, t := range tunnels {
 			if t.Kind == registry.KindHTTP {
-				writePty(ch, fmt.Sprintf("  [http] %s.%s  port %d  owner %s\n", t.Name, s.Domain, t.Port, t.User))
-			} else {
+				if seePeers {
+					writePty(ch, fmt.Sprintf("  [http] %s.%s  port %d  owner %s\n", t.Name, s.Domain, t.Port, t.User))
+				} else {
+					writePty(ch, fmt.Sprintf("  [http] %s.%s  port %d\n", t.Name, s.Domain, t.Port))
+				}
+			} else if seePeers {
 				writePty(ch, fmt.Sprintf("  [tcp]  %s:%d  owner %s\n", t.Name, t.Port, t.User))
+			} else {
+				writePty(ch, fmt.Sprintf("  [tcp]  %s:%d\n", t.Name, t.Port))
 			}
 		}
 		return true
 	case "blocked", "blocklist", "bans", "ban":
+		if !s.Authenticator.Can(st.user, perms.Blocks) {
+			writePty(ch, "error: permission denied: blocks required\n")
+			return true
+		}
 		blocked := s.Authenticator.BlockedIPs()
 		if len(blocked) == 0 {
 			writePty(ch, "(no blocked IPs)\n")

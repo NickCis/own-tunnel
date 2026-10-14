@@ -3,59 +3,131 @@ package tlsutil
 import (
 	"crypto/tls"
 	"fmt"
+	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/nickcis/own-tunnel/internal/config"
 )
 
+type certEntry struct {
+	certPath string
+	keyPath  string
+	cert     *tls.Certificate
+	certMod  time.Time
+	keyMod   time.Time
+}
+
 // Manager selects certificates by SNI: per-domain override, then default/wildcard.
+// Certificate files are re-read when their mtime changes (Let's Encrypt renewals).
 type Manager struct {
-	defaultCert *tls.Certificate
-	byHost      map[string]*tls.Certificate
+	mu           sync.Mutex
+	defaultEntry *certEntry
+	byHost       map[string]*certEntry
 }
 
 func NewManager(cfg config.TLSConfig) (*Manager, error) {
 	m := &Manager{
-		byHost: make(map[string]*tls.Certificate),
+		byHost: make(map[string]*certEntry),
 	}
 
 	if cfg.Cert != "" && cfg.Key != "" {
-		cert, err := tls.LoadX509KeyPair(cfg.Cert, cfg.Key)
+		e, err := newCertEntry(cfg.Cert, cfg.Key)
 		if err != nil {
 			return nil, fmt.Errorf("load default tls cert: %w", err)
 		}
-		m.defaultCert = &cert
+		m.defaultEntry = e
 	}
 
 	for host, d := range cfg.Domains {
-		cert, err := tls.LoadX509KeyPair(d.Cert, d.Key)
+		e, err := newCertEntry(d.Cert, d.Key)
 		if err != nil {
 			return nil, fmt.Errorf("load tls cert for %q: %w", host, err)
 		}
-		c := cert
-		m.byHost[strings.ToLower(host)] = &c
+		m.byHost[strings.ToLower(host)] = e
 	}
 
-	if m.defaultCert == nil && len(m.byHost) == 0 {
+	if m.defaultEntry == nil && len(m.byHost) == 0 {
 		return nil, fmt.Errorf("no TLS certificates configured")
 	}
 	return m, nil
 }
 
-func (m *Manager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-	if hello != nil && hello.ServerName != "" {
-		if c, ok := m.byHost[strings.ToLower(hello.ServerName)]; ok {
-			return c, nil
+func newCertEntry(certPath, keyPath string) (*certEntry, error) {
+	e := &certEntry{certPath: certPath, keyPath: keyPath}
+	if err := e.reload(); err != nil {
+		return nil, err
+	}
+	return e, nil
+}
+
+func (e *certEntry) reload() error {
+	certInfo, err := os.Stat(e.certPath)
+	if err != nil {
+		return err
+	}
+	keyInfo, err := os.Stat(e.keyPath)
+	if err != nil {
+		return err
+	}
+	cert, err := tls.LoadX509KeyPair(e.certPath, e.keyPath)
+	if err != nil {
+		return err
+	}
+	e.cert = &cert
+	e.certMod = certInfo.ModTime()
+	e.keyMod = keyInfo.ModTime()
+	return nil
+}
+
+func (e *certEntry) get() (*tls.Certificate, error) {
+	certInfo, err := os.Stat(e.certPath)
+	if err != nil {
+		if e.cert != nil {
+			return e.cert, nil
+		}
+		return nil, err
+	}
+	keyInfo, err := os.Stat(e.keyPath)
+	if err != nil {
+		if e.cert != nil {
+			return e.cert, nil
+		}
+		return nil, err
+	}
+	if e.cert == nil || !certInfo.ModTime().Equal(e.certMod) || !keyInfo.ModTime().Equal(e.keyMod) {
+		if err := e.reload(); err != nil {
+			if e.cert != nil {
+				// Keep serving the previous cert if a partial renew is in flight.
+				return e.cert, nil
+			}
+			return nil, err
 		}
 	}
-	if m.defaultCert != nil {
-		return m.defaultCert, nil
+	return e.cert, nil
+}
+
+func (m *Manager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if hello != nil && hello.ServerName != "" {
+		if e, ok := m.byHost[strings.ToLower(hello.ServerName)]; ok {
+			return e.get()
+		}
 	}
-	// Fall back to any configured domain cert
-	for _, c := range m.byHost {
-		return c, nil
+	if m.defaultEntry != nil {
+		return m.defaultEntry.get()
 	}
-	return nil, fmt.Errorf("no certificate available for %q", hello.ServerName)
+	for _, e := range m.byHost {
+		return e.get()
+	}
+	name := ""
+	if hello != nil {
+		name = hello.ServerName
+	}
+	return nil, fmt.Errorf("no certificate available for %q", name)
 }
 
 func (m *Manager) TLSConfig() *tls.Config {

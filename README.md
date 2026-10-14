@@ -29,6 +29,8 @@ Point DNS at the server:
 
 Supply a wildcard (or SAN) certificate for `*.tunnel.example.com` under `tls.cert` / `tls.key`. Optional per-host certs go under `tls.domains`.
 
+TLS files are re-read automatically when their mtime changes (no process restart needed after a Let's Encrypt renew that overwrites the PEMs in place).
+
 Privileged ports (`22`/`80`/`443`) need root or `CAP_NET_BIND_SERVICE`. The example config uses high ports for local testing.
 
 ## Create tunnels (`-R`)

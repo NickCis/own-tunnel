@@ -27,7 +27,7 @@ internal/logging/        # slog setup
 internal/namegen/        # DNS labels + random names
 internal/registry/       # in-memory name:port → owner ssh.Conn
 internal/sshserver/      # SSH accept, -R/-L, menu
-internal/tlsutil/        # wildcard + per-domain certs
+internal/tlsutil/        # wildcard + per-domain certs (mtime-based hot reload)
 scripts/hashpassword.go  # bcrypt helper for config
 config.example.yaml
 ```

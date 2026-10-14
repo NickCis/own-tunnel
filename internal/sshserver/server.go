@@ -427,9 +427,20 @@ func (s *Server) handleSession(st *sessionState, newChannel ssh.NewChannel) {
 		defer close(reqsDone)
 		for req := range reqs {
 			switch req.Type {
-			case "pty-req", "env", "window-change", "signal":
+			case "pty-req", "env", "window-change":
 				if req.WantReply {
 					_ = req.Reply(true, nil)
+				}
+			case "signal":
+				var sig struct{ Name string }
+				_ = ssh.Unmarshal(req.Payload, &sig)
+				if req.WantReply {
+					_ = req.Reply(true, nil)
+				}
+				switch strings.ToUpper(sig.Name) {
+				case "INT", "TERM", "KILL", "HUP":
+					writePty(ch, "\nbye\n")
+					_ = st.conn.Close()
 				}
 			case "shell", "exec":
 				if req.WantReply {
@@ -488,14 +499,24 @@ func (s *Server) runSession(st *sessionState, ch ssh.Channel) {
 func (s *Server) runForwardHold(st *sessionState, ch ssh.Channel) {
 	writePty(ch, "\nforwarding session active — keep this connection open (Ctrl-C to stop)\n")
 
-	// Hold the session open; discard input (no interactive menu).
+	// Hold the session open; discard input except Ctrl-C / Ctrl-D which disconnect.
 	buf := make([]byte, 256)
 	for {
 		if st.exiting.Load() {
 			time.Sleep(200 * time.Millisecond)
 			return
 		}
-		_, err := ch.Read(buf)
+		n, err := ch.Read(buf)
+		if n > 0 {
+			for i := 0; i < n; i++ {
+				switch buf[i] {
+				case 0x03, 0x04: // Ctrl-C / Ctrl-D
+					writePty(ch, "\nbye\n")
+					_ = st.conn.Close()
+					return
+				}
+			}
+		}
 		if err != nil {
 			return
 		}

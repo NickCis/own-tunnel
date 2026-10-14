@@ -38,8 +38,9 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 
 	t, ok := s.Registry.GetHTTP(name)
 	if !ok {
-		http.Error(w, "tunnel not found", http.StatusNotFound)
-		s.logRequest(r, name, http.StatusNotFound, 0, start)
+		// No active backend for this subdomain — same class of failure as dial errors.
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+		s.logRequest(r, name, http.StatusBadGateway, 0, start)
 		return
 	}
 

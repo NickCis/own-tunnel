@@ -71,6 +71,86 @@ ssh -L 5432:myapp:5432 bob@tunnel.example.com
 
 `direct-tcpip` only resolves registered tunnel names — the server is not an open TCP proxy.
 
+## Forward SSH (port 22)
+
+Publish a remote SSH server the same way as any other TCP port:
+
+```bash
+# Publisher — expose local sshd
+ssh -R homelab:22:localhost:22 alice@tunnel.example.com -N
+```
+
+Consumers reach it through own-tunnel with OpenSSH **`-W`** (opens a `direct-tcpip` channel). No server changes are required; port 22 uses the same TCP bridge as other non-HTTP ports.
+
+### ProxyCommand (stock OpenSSH)
+
+```bash
+ssh -o ProxyCommand='ssh -W homelab:22 bob@tunnel.example.com' admin@homelab
+```
+
+Or in `~/.ssh/config`:
+
+```
+Host homelab
+  ProxyCommand ssh -W homelab:22 bob@tunnel.example.com
+  User admin
+  HostName homelab
+```
+
+Then: `ssh homelab`
+
+Authentication is **two layers**:
+
+| Layer | Server | Typical auth |
+|-------|--------|--------------|
+| Outer (ProxyCommand) | own-tunnel | your tunnel account (`bob`) |
+| Inner (main `ssh`) | forwarded sshd | target account (`admin`) |
+
+The inner session (password or public key) is forwarded unchanged. own-tunnel only authenticates the outer hop.
+
+**Password caveat:** the nested `ssh` inside `ProxyCommand` usually has no TTY, so it often **cannot** prompt for your own-tunnel password. Practical options:
+
+- Use an **SSH key** for the own-tunnel login (recommended).
+- Open a **ControlMaster** first on a real TTY, then reuse it (see wrapper below).
+- Prompt once yourself: `ssh -M -N -f bob@tunnel.example.com`, then run the ProxyCommand command.
+
+### Helper script (`scripts/ot-ssh`)
+
+Single bash file, **ssh only** as a dependency. Wraps the common `ssh -R` / `-L` / `-W` invocations:
+
+```bash
+chmod +x scripts/ot-ssh
+
+# Host only — ssh uses your local username ($USER), same as plain ssh
+export OT_HOST=tunnel.example.com
+
+# Or user@host when the tunnel account differs from your local user
+export OT_HOST=alice@tunnel.example.com
+
+# Publish
+ot-ssh publish http  myapp 3000
+ot-ssh publish tcp   myapp 5432 5432
+ot-ssh publish ssh   homelab
+
+# Consume TCP (local listener)
+ot-ssh forward tcp myapp 5432
+
+# Consume SSH (-W + control socket; password-friendly own-tunnel login)
+ot-ssh ssh homelab admin
+ot-ssh ssh homelab admin -- ls -la
+
+# Interactive menu
+ot-ssh open
+```
+
+Per-invocation: `ot-ssh -h alice@tunnel.example.com …` or `-u alice` to override the user from `OT_HOST`.
+
+Global options / environment: `OT_HOST` (hostname or `user@host`), `OT_USER` (optional override), `OT_PORT`, `OT_CONTROL_DIR`, `OT_CONTROL_PERSIST`.
+
+For `ot-ssh ssh`, the script opens (or reuses) a **ControlMaster** to own-tunnel so your tunnel password can be entered on a real TTY once; the proxied session then prompts for the target host separately.
+
+For non-interactive use (cron/CI), use SSH keys for the own-tunnel account. Optional extra dependency: [`sshpass`](https://linux.die.net/man/1/sshpass) if you must script password login — not built in; keys are safer.
+
 ## Interactive menu
 
 ```bash

@@ -1,0 +1,285 @@
+#!/usr/bin/env bash
+# own-tunnel helper — thin wrapper around stock OpenSSH for publish/consume.
+# Depends on: bash, ssh
+set -euo pipefail
+
+OT_HOST="${OT_HOST:-}"
+OT_USER="${OT_USER:-}"
+OT_PORT="${OT_PORT:-22}"
+OT_CONTROL_DIR="${OT_CONTROL_DIR:-${HOME}/.ssh}"
+OT_CONTROL_PERSIST="${OT_CONTROL_PERSIST:-30m}"
+
+# Set by resolve_host: bare hostname and optional login user.
+OT_HOSTNAME=""
+OT_LOGIN_USER=""
+
+usage() {
+	cat <<'EOF'
+Usage: ot-ssh [global options] <command> [args...]
+
+Global options (or environment):
+  -h, --host HOST    own-tunnel server (hostname or user@host)   OT_HOST
+  -u, --user USER    own-tunnel login user (overrides user@host) OT_USER
+  -p, --port PORT    own-tunnel SSH port                         OT_PORT (default: 22)
+
+When HOST has no user, ssh uses your local username ($USER) — same as plain ssh.
+
+Commands:
+  publish http  <name> <local-port>
+                  Expose HTTP (remote :80) → http(s)://<name>.<domain>
+  publish tcp   <name> <remote-port> <local-port>
+                  Register a TCP tunnel (consume with forward tcp)
+  publish ssh   <name> [local-port=22]
+                  Register SSH (remote :22); consume with "ssh" command
+
+  forward tcp   <name> <remote-port> [local-port]
+                  Local listener → tunnel (default local port = remote port)
+
+  ssh           <name> [target-user] [-- ssh-args...]
+                  Connect to a published SSH tunnel via -W + control socket
+                  (password-friendly own-tunnel login)
+
+  open
+                  Interactive own-tunnel shell (help, list, …)
+
+  help
+                  Show this help
+
+Examples:
+  ot-ssh -h alice@tunnel.example.com publish http myapp 3000
+  OT_HOST=tunnel.example.com ot-ssh publish ssh homelab
+  ot-ssh -h tunnel.example.com -u alice forward tcp myapp 5432
+  OT_HOST=alice@tunnel.example.com ot-ssh ssh homelab admin
+EOF
+}
+
+die() {
+	echo "error: $*" >&2
+	exit 1
+}
+
+parse_globals() {
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+		-h | --host)
+			[[ $# -ge 2 ]] || die "missing value for $1"
+			OT_HOST="$2"
+			shift 2
+			;;
+		-u | --user)
+			[[ $# -ge 2 ]] || die "missing value for $1"
+			OT_USER="$2"
+			shift 2
+			;;
+		-p | --port)
+			[[ $# -ge 2 ]] || die "missing value for $1"
+			OT_PORT="$2"
+			shift 2
+			;;
+		--help)
+			usage
+			;;
+		-*)
+			die "unknown option: $1"
+			;;
+		*)
+			break
+			;;
+		esac
+	done
+	REMAINING=("$@")
+}
+
+require_host() {
+	[[ -n "$OT_HOST" ]] || die "set OT_HOST or pass -h/--host"
+	resolve_host
+}
+
+# Split user@host; -u / OT_USER wins over the user part of OT_HOST.
+resolve_host() {
+	local host=$OT_HOST user=${OT_USER:-}
+
+	if [[ "$host" == *@* ]]; then
+		[[ -z "$user" ]] && user="${host%%@*}"
+		host="${host#*@}"
+	fi
+
+	[[ -n "$host" ]] || die "invalid host (empty after parsing user@host)"
+
+	OT_HOSTNAME=$host
+	OT_LOGIN_USER=$user
+}
+
+ssh_port_args() {
+	if [[ "$OT_PORT" != "22" ]]; then
+		echo -p "$OT_PORT"
+	fi
+}
+
+# Argument passed to ssh (bare host when no explicit login user).
+ot_target() {
+	if [[ -n "$OT_LOGIN_USER" ]]; then
+		echo "${OT_LOGIN_USER}@${OT_HOSTNAME}"
+	else
+		echo "${OT_HOSTNAME}"
+	fi
+}
+
+# Effective login@host for control-socket paths (always includes a user).
+ot_identity() {
+	echo "${OT_LOGIN_USER:-$USER}@${OT_HOSTNAME}"
+}
+
+control_sock() {
+	mkdir -p "$OT_CONTROL_DIR"
+	echo "${OT_CONTROL_DIR}/ot-cm-$(ot_identity):${OT_PORT}"
+}
+
+ensure_master() {
+	local sock
+	sock="$(control_sock)"
+	local -a port_args
+	port_args=($(ssh_port_args))
+	if ssh -S "$sock" -O check "$(ot_target)" "${port_args[@]}" 2>/dev/null; then
+		return 0
+	fi
+	echo "Authenticating to own-tunnel ($(ot_target))..." >&2
+	ssh -M -S "$sock" -f -N \
+		-o "ControlPersist=${OT_CONTROL_PERSIST}" \
+		"${port_args[@]}" \
+		"$(ot_target)"
+}
+
+cmd_publish_http() {
+	require_host
+	[[ $# -eq 2 ]] || die "usage: publish http <name> <local-port>"
+	local name=$1 local_port=$2
+	local -a port_args
+	port_args=($(ssh_port_args))
+	exec ssh -N \
+		-R "${name}:80:localhost:${local_port}" \
+		"${port_args[@]}" \
+		"$(ot_target)"
+}
+
+cmd_publish_tcp() {
+	require_host
+	[[ $# -eq 3 ]] || die "usage: publish tcp <name> <remote-port> <local-port>"
+	local name=$1 remote_port=$2 local_port=$3
+	local -a port_args
+	port_args=($(ssh_port_args))
+	exec ssh -N \
+		-R "${name}:${remote_port}:localhost:${local_port}" \
+		"${port_args[@]}" \
+		"$(ot_target)"
+}
+
+cmd_publish_ssh() {
+	require_host
+	local name local_port=22
+	case $# in
+	1) name=$1 ;;
+	2) name=$1 local_port=$2 ;;
+	*) die "usage: publish ssh <name> [local-port=22]" ;;
+	esac
+	local -a port_args
+	port_args=($(ssh_port_args))
+	exec ssh -N \
+		-R "${name}:22:localhost:${local_port}" \
+		"${port_args[@]}" \
+		"$(ot_target)"
+}
+
+cmd_forward_tcp() {
+	require_host
+	[[ $# -ge 2 && $# -le 3 ]] || die "usage: forward tcp <name> <remote-port> [local-port]"
+	local name=$1 remote_port=$2 local_port=${3:-$remote_port}
+	local -a port_args
+	port_args=($(ssh_port_args))
+	exec ssh -N \
+		-L "${local_port}:${name}:${remote_port}" \
+		"${port_args[@]}" \
+		"$(ot_target)"
+}
+
+cmd_ssh() {
+	require_host
+	[[ $# -ge 1 ]] || die "usage: ssh <name> [target-user] [-- ssh-args...]"
+	local tunnel=$1
+	shift
+
+	local target_user=$USER
+	if [[ $# -ge 1 && "$1" != "--" ]]; then
+		target_user=$1
+		shift
+	fi
+	if [[ "${1:-}" == "--" ]]; then
+		shift
+	fi
+
+	ensure_master
+
+	local sock proxy_cmd
+	sock="$(control_sock)"
+	proxy_cmd="ssh -S ${sock} -W ${tunnel}:22"
+	if [[ "$OT_PORT" != "22" ]]; then
+		proxy_cmd+=" -p ${OT_PORT}"
+	fi
+	proxy_cmd+=" $(ot_target)"
+
+	exec ssh \
+		-o "ProxyCommand=${proxy_cmd}" \
+		-o ControlPath=none \
+		"${target_user}@${tunnel}" \
+		"$@"
+}
+
+cmd_open() {
+	require_host
+	local -a port_args
+	port_args=($(ssh_port_args))
+	exec ssh "${port_args[@]}" "$(ot_target)"
+}
+
+main() {
+	parse_globals "$@"
+	set -- "${REMAINING[@]:-}"
+
+	[[ $# -ge 1 ]] || usage
+
+	local cmd=$1
+	shift
+
+	case "$cmd" in
+	help | -h | --help)
+		usage
+		;;
+	publish)
+		[[ $# -ge 1 ]] || die "usage: publish <http|tcp|ssh> ..."
+		local sub=$1
+		shift
+		case "$sub" in
+		http) cmd_publish_http "$@" ;;
+		tcp) cmd_publish_tcp "$@" ;;
+		ssh) cmd_publish_ssh "$@" ;;
+		*) die "unknown publish subcommand: $sub (try http, tcp, ssh)" ;;
+		esac
+		;;
+	forward)
+		[[ $# -ge 1 ]] || die "usage: forward <tcp> ..."
+		local sub=$1
+		shift
+		case "$sub" in
+		tcp) cmd_forward_tcp "$@" ;;
+		*) die "unknown forward subcommand: $sub (try tcp)" ;;
+		esac
+		;;
+	ssh) cmd_ssh "$@" ;;
+	open) cmd_open "$@" ;;
+	*)
+		die "unknown command: $cmd (try: publish, forward, ssh, open, help)"
+		;;
+	esac
+}
+
+main "$@"

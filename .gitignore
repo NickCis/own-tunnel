@@ -26,3 +26,5 @@ vendor/
 # Logs / temp
 *.log
 /tmp/
+
+own-tunnel-raspberry-pi

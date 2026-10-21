@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -17,7 +18,24 @@ import (
 	"github.com/nickcis/own-tunnel/internal/registry"
 	"github.com/nickcis/own-tunnel/internal/sshserver"
 	"github.com/nickcis/own-tunnel/internal/tlsutil"
+	"github.com/nickcis/own-tunnel/internal/wsgateway"
 )
+
+func websocketReservedTunnelName(cfg *config.Config) string {
+	if cfg == nil || !cfg.WebSocketEnabled() {
+		return ""
+	}
+	host := strings.ToLower(strings.TrimSpace(cfg.WebSocket.Host))
+	domain := strings.ToLower(strings.TrimSpace(cfg.Domain))
+	if host == "" || domain == "" || host == domain {
+		return ""
+	}
+	name, ok := strings.CutSuffix(host, "."+domain)
+	if !ok || name == "" {
+		return ""
+	}
+	return name
+}
 
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to YAML config")
@@ -47,6 +65,11 @@ func main() {
 
 	reg := registry.New()
 	sshSrv := sshserver.New(signers, authenticator, reg, cfg.Domain, cfg.Auth.MaxAuthTries, logger)
+	sshSrv.HasTLS = cfg.HasTLS()
+	if name := websocketReservedTunnelName(cfg); name != "" {
+		sshSrv.ReservedNames = map[string]struct{}{name: {}}
+		logger.Info("websocket control host reserves tunnel name", "name", name)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -55,6 +78,23 @@ func main() {
 		Domain:   cfg.Domain,
 		Registry: reg,
 		Logger:   logger,
+	}
+
+	var wsGW *wsgateway.Gateway
+	if cfg.WebSocketEnabled() {
+		wsGW = wsgateway.New(sshSrv, cfg.WebSocket.Path, logger)
+		proxy.ControlHost = cfg.WebSocket.Host
+		proxy.ControlPath = cfg.WebSocket.Path
+		proxy.ControlHandler = wsGW
+		proxy.ControlRequireTLS = !cfg.WebSocket.AllowHTTP
+		logger.Info("websocket ssh gateway enabled",
+			"host", cfg.WebSocket.Host,
+			"path", cfg.WebSocket.Path,
+			"require_tls", proxy.ControlRequireTLS,
+		)
+		if !cfg.HasTLS() && !cfg.WebSocket.AllowHTTP {
+			logger.Warn("websocket ssh gateway requires TLS but no TLS certificates are configured; endpoint will be unreachable")
+		}
 	}
 
 	var wg sync.WaitGroup
@@ -105,6 +145,9 @@ func main() {
 	}
 
 	_ = sshSrv.Close()
+	if wsGW != nil {
+		_ = wsGW.Close()
+	}
 	wg.Wait()
 	if exitCode != 0 {
 		os.Exit(exitCode)

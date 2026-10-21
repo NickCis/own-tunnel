@@ -18,11 +18,18 @@ import (
 )
 
 type Server struct {
-	Config        *ssh.ServerConfig
-	Registry      *registry.Registry
-	Domain        string
-	Authenticator *auth.Authenticator
-	Logger        *slog.Logger
+	Config           *ssh.ServerConfig
+	Registry         *registry.Registry
+	Domain           string
+	Authenticator    *auth.Authenticator
+	Logger           *slog.Logger
+	HandshakeTimeout time.Duration
+	// HasTLS reports whether the HTTPS listener is configured, so HTTP tunnel
+	// messages only advertise URLs that can actually work.
+	HasTLS bool
+	// ReservedNames are tunnel names shadowed by the WebSocket control host
+	// (for example "connect" when websocket.host is connect.<domain>).
+	ReservedNames map[string]struct{}
 	listener      net.Listener
 	connSeq       atomic.Uint64
 }
@@ -33,10 +40,13 @@ func New(signers []ssh.Signer, authenticator *auth.Authenticator, reg *registry.
 		Domain:        domain,
 		Authenticator: authenticator,
 		Logger:        logger,
+		// Includes interactive password entry; matches OpenSSH's default
+		// LoginGraceTime. Tunnels keep the connection past this point.
+		HandshakeTimeout: 2 * time.Minute,
 	}
 
 	if maxAuthTries < 1 {
-		maxAuthTries = 3
+		maxAuthTries = 6
 	}
 	cfg := &ssh.ServerConfig{
 		PasswordCallback:  authenticator.Password,
@@ -63,7 +73,7 @@ func (s *Server) ListenAndServe(addr string) error {
 		if err != nil {
 			return err
 		}
-		go s.handleConn(conn)
+		go s.ServeConn(conn)
 	}
 }
 
@@ -137,17 +147,25 @@ func (st *sessionState) failAndExit(msg string) {
 	}
 	st.notify(msg)
 	go func() {
-		time.Sleep(150 * time.Millisecond) // let session flush
+		time.Sleep(1 * time.Second) // let a status session attach and flush
 		_ = st.conn.Close()
 	}()
 }
 
-func (s *Server) handleConn(nc net.Conn) {
+// ServeConn runs the SSH server over an already-established connection. It is
+// used by the TCP listener and by transports such as WebSocket.
+func (s *Server) ServeConn(nc net.Conn) {
 	defer nc.Close()
 
+	if s.HandshakeTimeout > 0 {
+		_ = nc.SetDeadline(time.Now().Add(s.HandshakeTimeout))
+	}
 	sshConn, chans, reqs, err := ssh.NewServerConn(nc, s.Config)
+	if s.HandshakeTimeout > 0 {
+		_ = nc.SetDeadline(time.Time{})
+	}
 	if err != nil {
-		s.Logger.Debug("ssh handshake failed", "peer", nc.RemoteAddr().String(), "err", err)
+		s.Logger.Debug("ssh handshake failed", "peer", nc.RemoteAddr().String(), "network", nc.RemoteAddr().Network(), "err", err)
 		return
 	}
 	defer sshConn.Close()
@@ -164,7 +182,7 @@ func (s *Server) handleConn(nc net.Conn) {
 		conn:   sshConn,
 	}
 
-	s.Logger.Info("ssh connected", "user", user, "peer", sshConn.RemoteAddr().String(), "conn_id", connID)
+	s.Logger.Info("ssh connected", "user", user, "peer", sshConn.RemoteAddr().String(), "network", sshConn.RemoteAddr().Network(), "conn_id", connID)
 
 	go s.handleGlobalReqs(st, reqs)
 
@@ -242,9 +260,19 @@ func (s *Server) handleTCPIPForward(st *sessionState, req *ssh.Request) {
 	)
 	if autoNamed {
 		// Allocate name + insert under one lock to avoid races.
-		t, err = s.Registry.RegisterAllocated(opts, func() (string, error) {
-			return namegen.Random(8)
-		}, 16)
+		nameGen := func() (string, error) {
+			for i := 0; i < 16; i++ {
+				name, err := namegen.Random(8)
+				if err != nil {
+					return "", err
+				}
+				if _, reserved := s.ReservedNames[name]; !reserved {
+					return name, nil
+				}
+			}
+			return "", fmt.Errorf("could not allocate a non-reserved tunnel name")
+		}
+		t, err = s.Registry.RegisterAllocated(opts, nameGen, 16)
 	} else {
 		opts.Name, err = namegen.Sanitize(rf.Addr)
 		if err != nil {
@@ -253,6 +281,15 @@ func (s *Server) handleTCPIPForward(st *sessionState, req *ssh.Request) {
 				_ = req.Reply(false, nil)
 			}
 			st.failAndExit(fmt.Sprintf("error: %v\n", err))
+			return
+		}
+		if _, reserved := s.ReservedNames[opts.Name]; reserved {
+			err := fmt.Errorf("%q is reserved for the WebSocket control host", opts.Name)
+			s.Logger.Warn("tunnel reject", "user", st.user, "name", opts.Name, "port", rf.Port, "reason", err.Error())
+			if req.WantReply {
+				_ = req.Reply(false, nil)
+			}
+			st.failAndExit(fmt.Sprintf("error: cannot bind %s:%d: %v\n", opts.Name, rf.Port, err))
 			return
 		}
 		t, err = s.Registry.Register(opts)
@@ -310,7 +347,9 @@ func (s *Server) formatTunnelMessage(t *registry.Tunnel, autoNamed bool) string 
 	}
 	if t.Kind == registry.KindHTTP {
 		b.WriteString(fmt.Sprintf("http tunnel:  http://%s.%s\n", t.Name, s.Domain))
-		b.WriteString(fmt.Sprintf("https tunnel: https://%s.%s\n", t.Name, s.Domain))
+		if s.HasTLS {
+			b.WriteString(fmt.Sprintf("https tunnel: https://%s.%s\n", t.Name, s.Domain))
+		}
 	} else {
 		b.WriteString(fmt.Sprintf("tcp tunnel: %s:%d\n", t.Name, t.Port))
 		b.WriteString(fmt.Sprintf("consume with: ssh -L <local>:%s:%d <user>@<server>\n", t.Name, t.Port))
@@ -402,6 +441,10 @@ func (s *Server) handleSession(st *sessionState, newChannel ssh.NewChannel) {
 	}
 	defer ch.Close()
 
+	// Write the header before attaching the notifier so pending tunnel
+	// messages cannot appear above it.
+	writePty(ch, fmt.Sprintf("own-tunnel (%s) — authenticated as %s\n", s.Domain, st.user))
+
 	notifyCh := make(chan string, 32)
 	st.addNotifier(notifyCh)
 	stopNotify := make(chan struct{})
@@ -466,8 +509,6 @@ func (s *Server) handleSession(st *sessionState, newChannel ssh.NewChannel) {
 }
 
 func (s *Server) runSession(st *sessionState, ch ssh.Channel) {
-	writePty(ch, fmt.Sprintf("own-tunnel (%s) — authenticated as %s\n", s.Domain, st.user))
-
 	// Remote forwards often arrive just before/around shell; wait briefly.
 	// Pending notify messages (including errors) are flushed when the notifier was added.
 	deadline := time.Now().Add(400 * time.Millisecond)

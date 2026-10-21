@@ -11,21 +11,31 @@ import (
 )
 
 type Config struct {
-	Domain      string       `yaml:"domain"`
-	Listen      ListenConfig `yaml:"listen"`
-	TLS         TLSConfig    `yaml:"tls"`
-	Log         LogConfig    `yaml:"log"`
-	Auth        AuthConfig   `yaml:"auth"`
-	HostKeysDir string      `yaml:"host_keys_dir"`
-	Users       []UserConfig `yaml:"users"`
+	Domain      string          `yaml:"domain"`
+	Listen      ListenConfig    `yaml:"listen"`
+	TLS         TLSConfig       `yaml:"tls"`
+	Log         LogConfig       `yaml:"log"`
+	Auth        AuthConfig      `yaml:"auth"`
+	WebSocket   WebSocketConfig `yaml:"websocket"`
+	HostKeysDir string          `yaml:"host_keys_dir"`
+	Users       []UserConfig    `yaml:"users"`
+}
+
+// WebSocketConfig controls the SSH-over-WebSocket transport. The endpoint is
+// served by the existing HTTP/HTTPS listener; no extra port is opened.
+type WebSocketConfig struct {
+	Enabled   *bool  `yaml:"enabled"`    // default true
+	Host      string `yaml:"host"`       // default: domain (apex)
+	Path      string `yaml:"path"`       // default: /ws
+	AllowHTTP bool   `yaml:"allow_http"` // default false (HTTPS only)
 }
 
 // AuthConfig controls SSH login throttling (fail2ban-style per IP).
 type AuthConfig struct {
-	MaxFailures   int    `yaml:"max_failures"`    // failures within window before lockout (default 5)
-	FailureWindow string `yaml:"failure_window"`  // e.g. "15m" (default 15m)
-	Lockout       string `yaml:"lockout"`         // e.g. "15m" (default 15m)
-	MaxAuthTries  int    `yaml:"max_auth_tries"`  // per SSH connection (default 3)
+	MaxFailures   int    `yaml:"max_failures"`   // failures within window before lockout (default 5)
+	FailureWindow string `yaml:"failure_window"` // e.g. "15m" (default 15m)
+	Lockout       string `yaml:"lockout"`        // e.g. "15m" (default 15m)
+	MaxAuthTries  int    `yaml:"max_auth_tries"` // per SSH connection (default 6)
 }
 
 type ListenConfig struct {
@@ -35,9 +45,9 @@ type ListenConfig struct {
 }
 
 type TLSConfig struct {
-	Cert    string                    `yaml:"cert"`
-	Key     string                    `yaml:"key"`
-	Domains map[string]DomainTLSCert  `yaml:"domains"`
+	Cert    string                   `yaml:"cert"`
+	Key     string                   `yaml:"key"`
+	Domains map[string]DomainTLSCert `yaml:"domains"`
 }
 
 type DomainTLSCert struct {
@@ -91,6 +101,14 @@ func (c *Config) applyDefaults() {
 	if c.HostKeysDir == "" {
 		c.HostKeysDir = "./host_keys"
 	}
+	c.WebSocket.Host = strings.ToLower(strings.TrimSpace(c.WebSocket.Host))
+	c.WebSocket.Path = strings.TrimSpace(c.WebSocket.Path)
+	if c.WebSocket.Path == "" {
+		c.WebSocket.Path = "/ws"
+	}
+	if c.WebSocket.Host == "" {
+		c.WebSocket.Host = c.Domain
+	}
 	if c.Log.Level == "" {
 		c.Log.Level = "info"
 	}
@@ -116,7 +134,7 @@ func (c *Config) applyDefaults() {
 		c.Auth.Lockout = "15m"
 	}
 	if c.Auth.MaxAuthTries == 0 {
-		c.Auth.MaxAuthTries = 3
+		c.Auth.MaxAuthTries = 6
 	}
 }
 
@@ -178,6 +196,16 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("log.format must be json|text")
 	}
 
+	if c.WebSocket.Path == "/" || !strings.HasPrefix(c.WebSocket.Path, "/") {
+		return fmt.Errorf("websocket.path must start with / and must not be the root path")
+	}
+	if strings.ContainsAny(c.WebSocket.Path, "?#") {
+		return fmt.Errorf("websocket.path must not contain ? or #")
+	}
+	if strings.ContainsAny(c.WebSocket.Host, "/?#:") {
+		return fmt.Errorf("websocket.host must be a hostname without scheme, port, or path")
+	}
+
 	hasDefaultTLS := c.TLS.Cert != "" && c.TLS.Key != ""
 	if (c.TLS.Cert == "") != (c.TLS.Key == "") {
 		return fmt.Errorf("tls.cert and tls.key must both be set or both empty")
@@ -200,6 +228,11 @@ func (c *Config) HasTLS() bool {
 		return true
 	}
 	return len(c.TLS.Domains) > 0
+}
+
+// WebSocketEnabled reports whether the SSH-over-WebSocket endpoint is enabled.
+func (c *Config) WebSocketEnabled() bool {
+	return c.WebSocket.Enabled == nil || *c.WebSocket.Enabled
 }
 
 // ParseDuration parses Go duration strings (e.g. "15m", "1h").

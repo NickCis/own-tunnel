@@ -29,12 +29,21 @@ auth:
   max_failures: 5       # failures within failure_window → lockout
   failure_window: 15m
   lockout: 15m
-  max_auth_tries: 3     # per SSH connection (x/crypto/ssh MaxAuthTries)
+  max_auth_tries: 6     # per SSH connection (OpenSSH default)
+
+# SSH over WebSocket (for environments where the SSH port/protocol is blocked).
+# Uses the existing HTTP/HTTPS listener; no extra port is opened.
+websocket:
+  enabled: true
+  host: ""              # default: domain (apex); e.g. connect.tunnel.example.com reserves that subdomain
+  path: /ws             # reserved path on that host
+  allow_http: false     # default: HTTPS only; set true only for local testing/trusted proxies
 
 users:
   - name: alice
-    # bcrypt for "password" — replace with: go run ./scripts/hashpassword.go 'secret'
-    password_hash: "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+    # Example only: bcrypt for "password". Replace it with:
+    #   go run ./scripts/hashpassword.go 'your-password'
+    password_hash: "$2a$10$DzMvO5BcWDzPjQak2c/vSOJPc135zXzcblnUFZc/CMfUG12rIOtGu"
     # Permissions (omit for default: publish + dial, own tunnels only):
     #   admin    — everything
     #   publish  — create tunnels (-R)

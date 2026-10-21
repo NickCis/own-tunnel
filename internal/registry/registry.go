@@ -24,14 +24,23 @@ type Tunnel struct {
 	ClientBind string // exact bind addr from tcpip-forward (for forwarded-tcpip)
 	Kind       Kind
 	User       string
-	ConnID string
-	Conn   ssh.Conn
+	ConnID     string
+	Conn       ssh.Conn
 }
 
 // Dial opens a forwarded-tcpip channel to the tunnel owner.
 // Addr/Port must match the client's tcpip-forward request or OpenSSH rejects the channel.
 func (t *Tunnel) Dial(originAddr string, originPort uint32) (ssh.Channel, error) {
 	bind := t.ClientBind
+	if originAddr == "" {
+		originAddr = "0.0.0.0"
+	}
+	// Some SSH clients (including x/crypto/ssh) send origin port 0 for
+	// direct-tcpip. OpenSSH rejects forwarded-tcpip channels with port 0, so
+	// normalize the informational origin fields to a valid value.
+	if originPort == 0 {
+		originPort = 1
+	}
 	payload := ssh.Marshal(struct {
 		Addr       string
 		Port       uint32
@@ -52,10 +61,10 @@ func (t *Tunnel) Dial(originAddr string, originPort uint32) (ssh.Channel, error)
 }
 
 type Registry struct {
-	mu      sync.RWMutex
-	byKey   map[string]*Tunnel            // name:port
-	byConn  map[string]map[string]*Tunnel // connID -> key -> tunnel
-	byUser  map[string]map[string]*Tunnel // user -> key -> tunnel
+	mu     sync.RWMutex
+	byKey  map[string]*Tunnel            // name:port
+	byConn map[string]map[string]*Tunnel // connID -> key -> tunnel
+	byUser map[string]map[string]*Tunnel // user -> key -> tunnel
 }
 
 func New() *Registry {

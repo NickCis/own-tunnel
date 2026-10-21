@@ -21,6 +21,14 @@ type Server struct {
 	Registry *registry.Registry
 	Logger   *slog.Logger
 	TLS      *tls.Config
+
+	// ControlHost/ControlPath reserve a host and path on this listener for an
+	// HTTP control endpoint (currently the SSH-over-WebSocket gateway).
+	// ControlHost defaults to Domain; ControlPath defaults to /ws.
+	ControlHost       string
+	ControlPath       string
+	ControlHandler    http.Handler
+	ControlRequireTLS bool
 }
 
 func (s *Server) Handler() http.Handler {
@@ -28,6 +36,15 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.isControlHost(r.Host) {
+		if r.URL.Path != s.controlPath() || (s.ControlRequireTLS && r.TLS == nil) {
+			http.NotFound(w, r)
+			return
+		}
+		s.ControlHandler.ServeHTTP(w, r)
+		return
+	}
+
 	start := time.Now()
 	name, ok := s.tunnelName(r.Host)
 	if !ok {
@@ -90,16 +107,38 @@ type chanConn struct {
 	ssh.Channel
 }
 
-func (c *chanConn) LocalAddr() net.Addr                { return dummyAddr{} }
-func (c *chanConn) RemoteAddr() net.Addr               { return dummyAddr{} }
-func (c *chanConn) SetDeadline(time.Time) error        { return nil }
-func (c *chanConn) SetReadDeadline(time.Time) error    { return nil }
-func (c *chanConn) SetWriteDeadline(time.Time) error   { return nil }
+func (c *chanConn) LocalAddr() net.Addr              { return dummyAddr{} }
+func (c *chanConn) RemoteAddr() net.Addr             { return dummyAddr{} }
+func (c *chanConn) SetDeadline(time.Time) error      { return nil }
+func (c *chanConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *chanConn) SetWriteDeadline(time.Time) error { return nil }
 
 type dummyAddr struct{}
 
 func (dummyAddr) Network() string { return "ssh" }
 func (dummyAddr) String() string  { return "ssh" }
+
+func (s *Server) isControlHost(host string) bool {
+	if s.ControlHandler == nil {
+		return false
+	}
+	host = strings.ToLower(host)
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	expected := strings.ToLower(s.ControlHost)
+	if expected == "" {
+		expected = strings.ToLower(s.Domain)
+	}
+	return host == expected
+}
+
+func (s *Server) controlPath() string {
+	if s.ControlPath == "" {
+		return "/ws"
+	}
+	return s.ControlPath
+}
 
 func (s *Server) tunnelName(host string) (string, bool) {
 	host = strings.ToLower(host)
